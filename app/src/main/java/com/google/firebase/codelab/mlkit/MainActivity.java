@@ -33,8 +33,23 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.google.android.gms.tasks.Continuation;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.ml.common.FirebaseMLException;
+import com.google.firebase.ml.common.modeldownload.FirebaseLocalModel;
+import com.google.firebase.ml.common.modeldownload.FirebaseModelDownloadConditions;
+import com.google.firebase.ml.common.modeldownload.FirebaseModelManager;
+import com.google.firebase.ml.common.modeldownload.FirebaseRemoteModel;
+import com.google.firebase.ml.custom.FirebaseCustomLocalModel;
+import com.google.firebase.ml.custom.FirebaseCustomRemoteModel;
+import com.google.firebase.ml.custom.FirebaseModelDataType;
+import com.google.firebase.ml.custom.FirebaseModelInputOutputOptions;
+import com.google.firebase.ml.custom.FirebaseModelInputs;
+import com.google.firebase.ml.custom.FirebaseModelInterpreter;
+import com.google.firebase.ml.custom.FirebaseModelInterpreterOptions;
+import com.google.firebase.ml.custom.FirebaseModelOutputs;
 import com.google.firebase.ml.vision.FirebaseVision;
 import com.google.firebase.ml.vision.common.FirebaseVisionImage;
 import com.google.firebase.ml.vision.document.FirebaseVisionDocumentText;
@@ -73,7 +88,7 @@ public class MainActivity extends AppCompatActivity implements AdapterView.OnIte
     /**
      * Name of the model file hosted with Firebase.
      */
-    private static final String HOSTED_MODEL_NAME = "cloud_model_1";
+    private static final String HOSTED_MODEL_NAME = "mobilenet_1";
     private static final String LOCAL_MODEL_ASSET = "mobilenet_v1_1.0_224_quant.tflite";
     /**
      * Name of the label file stored in Assets.
@@ -107,6 +122,16 @@ public class MainActivity extends AppCompatActivity implements AdapterView.OnIte
                     });
     /* Preallocated buffers for storing image data. */
     private final int[] intValues = new int[DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y];
+
+
+    /**
+     * An instance of the driver class to run model inference with Firebase.
+     */
+    private FirebaseModelInterpreter mInterpreter;
+    /**
+     * Data configuration of input & output data of model.
+     */
+    private FirebaseModelInputOutputOptions mDataOptions;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -250,11 +275,112 @@ public class MainActivity extends AppCompatActivity implements AdapterView.OnIte
     }
 
     private void initCustomModel() {
-        // Replace with code from the codelab to initialize your custom model
+        mLabelList = loadLabelList(this);
+
+        int[] inputDims = {DIM_BATCH_SIZE, DIM_IMG_SIZE_X, DIM_IMG_SIZE_Y, DIM_PIXEL_SIZE};
+        int[] outputDims = {DIM_BATCH_SIZE, mLabelList.size()};
+        try {
+            mDataOptions =
+                    new FirebaseModelInputOutputOptions.Builder()
+                            .setInputFormat(0, FirebaseModelDataType.BYTE, inputDims)
+                            .setOutputFormat(0, FirebaseModelDataType.BYTE, outputDims)
+                            .build();
+//            FirebaseModelDownloadConditions conditions = new FirebaseModelDownloadConditions
+//                    .Builder()
+//                    .requireWifi()
+//                    .build();
+            final FirebaseCustomRemoteModel remoteModel = new FirebaseCustomRemoteModel
+                    .Builder(HOSTED_MODEL_NAME)
+//                    .enableModelUpdates(true)
+//                    .setInitialDownloadConditions(conditions)
+//                    .setUpdatesDownloadConditions(conditions)  // You could also specify
+
+                    // different conditions
+                    // for updates
+                    .build();
+
+            // download remote model
+/*
+            FirebaseModelManager.getInstance().download(remoteModel, conditions)
+                    .addOnSuccessListener(new OnSuccessListener<Void>() {
+                        @Override
+                        public void onSuccess(Void v) {
+                            // Download complete. Depending on your app, you could enable
+                            // the ML feature, or switch from the local model to the remote
+                            // model, etc.
+                        }
+                    });
+            */
+            final FirebaseCustomLocalModel localModel =
+                    new FirebaseCustomLocalModel.Builder()
+                            .setAssetFilePath(LOCAL_MODEL_ASSET).build();
+
+            FirebaseModelManager.getInstance().isModelDownloaded(remoteModel)
+                    .addOnSuccessListener(new OnSuccessListener<Boolean>() {
+                        @Override
+                        public void onSuccess(Boolean isDownloaded) {
+                            FirebaseModelInterpreterOptions options;
+                            if (isDownloaded) {
+                                options = new FirebaseModelInterpreterOptions.Builder(remoteModel)
+                                        .build();
+                            } else {
+                                options = new FirebaseModelInterpreterOptions.Builder(localModel)
+                                        .build();
+                            }
+                            try {
+                                mInterpreter = FirebaseModelInterpreter.getInstance(options);
+                            } catch (FirebaseMLException e) {
+                                showToast("Error while setting up the model");
+                                e.printStackTrace();
+                            }
+                        }
+                    });
+
+        } catch (FirebaseMLException e) {
+            showToast("Error while setting up the model");
+            e.printStackTrace();
+        }
     }
 
     private void runModelInference() {
-        // Replace with code from the codelab to run inference using your custom model.
+        if (mInterpreter == null) {
+            Log.e(TAG, "Image classifier has not been initialized; Skipped.");
+            return;
+        }
+        // Create input data.
+        ByteBuffer imgData = convertBitmapToByteBuffer(mSelectedImage, mSelectedImage.getWidth(),
+                mSelectedImage.getHeight());
+
+        try {
+            FirebaseModelInputs inputs = new FirebaseModelInputs.Builder().add(imgData).build();
+            // Here's where the magic happens!!
+            mInterpreter
+                    .run(inputs, mDataOptions)
+                    .addOnFailureListener(new OnFailureListener() {
+                        @Override
+                        public void onFailure(@NonNull Exception e) {
+                            e.printStackTrace();
+                            showToast("Error running model inference");
+                        }
+                    })
+                    .continueWith(
+                            new Continuation<FirebaseModelOutputs, List<String>>() {
+                                @Override
+                                public List<String> then(Task<FirebaseModelOutputs> task) {
+                                    byte[][] labelProbArray = task.getResult()
+                                            .<byte[][]>getOutput(0);
+                                    List<String> topLabels = getTopLabels(labelProbArray);
+                                    mGraphicOverlay.clear();
+                                    GraphicOverlay.Graphic labelGraphic = new LabelGraphic
+                                            (mGraphicOverlay, topLabels);
+                                    mGraphicOverlay.add(labelGraphic);
+                                    return topLabels;
+                                }
+                            });
+        } catch (FirebaseMLException e) {
+            e.printStackTrace();
+            showToast("Error running model inference");
+        }
     }
 
     private void runCloudTextRecognition() {
